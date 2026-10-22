@@ -83,7 +83,15 @@ async def async_setup_entry(
 
     await coordinator.async_config_entry_first_refresh()
     await hass.config_entries.async_forward_entry_setups(entry, _PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
+
+
+async def _async_options_updated(
+    hass: HomeAssistant, entry: AnglianWaterConfigEntry
+) -> None:
+    """Reload so new tariff rates take effect."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(

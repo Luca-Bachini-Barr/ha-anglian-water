@@ -15,17 +15,28 @@ from pyanglianwater.exceptions import (
     SmartMeterUnavailableError,
 )
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import (
     CONF_ACCESS_TOKEN,
     CONF_CODE,
     CONF_PASSWORD,
     CONF_USERNAME,
 )
+from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
-from .const import CONF_ACCOUNT_NUMBER, DOMAIN
+from .const import (
+    CONF_ACCOUNT_NUMBER,
+    CONF_STANDING_CHARGE,
+    CONF_VOLUME_RATE,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -95,6 +106,12 @@ async def validate_account(auth: MSOB2CAuth, account_number: str) -> str | MSOB2
 
 class AnglianWaterConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Anglian Water."""
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Return the tariff options flow."""
+        return AnglianWaterOptionsFlow()
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -208,4 +225,41 @@ class AnglianWaterConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(
             title=user_input[CONF_ACCOUNT_NUMBER],
             data=config_entry_data,
+        )
+
+
+def _pence_selector(unit: str) -> selector.NumberSelector:
+    return selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=0,
+            step=0.001,
+            mode=selector.NumberSelectorMode.BOX,
+            unit_of_measurement=unit,
+        )
+    )
+
+
+class AnglianWaterOptionsFlow(OptionsFlow):
+    """Tariff rates used to calculate cost statistics."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage the tariff options."""
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+        options = self.config_entry.options
+        return self.async_show_form(
+            step_id="init",
+            data_schema=probatio.Schema(
+                {
+                    probatio.Required(
+                        CONF_VOLUME_RATE, default=options.get(CONF_VOLUME_RATE, 0.0)
+                    ): _pence_selector("p/m³"),
+                    probatio.Required(
+                        CONF_STANDING_CHARGE,
+                        default=options.get(CONF_STANDING_CHARGE, 0.0),
+                    ): _pence_selector("p/day"),
+                }
+            ),
         )

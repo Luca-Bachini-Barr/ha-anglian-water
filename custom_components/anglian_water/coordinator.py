@@ -31,7 +31,12 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import VolumeConverter
 
-from .const import CONF_ACCOUNT_NUMBER, DOMAIN
+from .const import (
+    CONF_ACCOUNT_NUMBER,
+    CONF_STANDING_CHARGE,
+    CONF_VOLUME_RATE,
+    DOMAIN,
+)
 from .helpers import (
     async_create_consent_required_issue,
     async_delete_consent_required_issue,
@@ -63,6 +68,7 @@ class AnglianWaterUpdateCoordinator(DataUpdateCoordinator[None]):
             config_entry=config_entry,
         )
         self.api = api
+        self.month_to_date: dict[str, dict[str, float]] = {}
 
     @override
     async def _async_update_data(self) -> None:
@@ -95,7 +101,139 @@ class AnglianWaterUpdateCoordinator(DataUpdateCoordinator[None]):
                 self.hass, self.config_entry.data[CONF_ACCOUNT_NUMBER]
             )
 
+    def _statistic_id_prefix(self, meter_serial: str) -> str:
+        """Return the statistic id prefix for a meter."""
+        return (
+            f"{DOMAIN}:{self.config_entry.data[CONF_ACCOUNT_NUMBER]}_{meter_serial}"
+        ).lower()
+
+    @property
+    def costs_configured(self) -> bool:
+        """Return True when tariff rates are set in the options."""
+        return bool(self.config_entry.options.get(CONF_VOLUME_RATE))
+
     async def _insert_statistics(self) -> None:
+        """Insert usage, then cost statistics, then refresh month-to-date."""
+        await self._insert_usage_statistics()
+        # The recorder doesn't commit queued statistics until startup has
+        # finished, so only wait for it once HA is running. During startup the
+        # cost and month-to-date figures catch up on the next refresh.
+        recorder = get_instance(self.hass)
+        if self.hass.is_running:
+            await recorder.async_block_till_done()
+        if self.costs_configured:
+            for meter in self.api.meters.values():
+                await self._insert_cost_statistics(meter.serial_number)
+            if self.hass.is_running:
+                await recorder.async_block_till_done()
+        await self._update_month_to_date()
+
+    async def _insert_cost_statistics(self, meter_serial: str) -> None:
+        """Derive hourly cost statistics from the hourly usage statistics.
+
+        Each record costs the change in the meter total times the volume rate,
+        plus the standing charge for the time since the previous record, so
+        gaps in the hourly data (e.g. while the login had expired) are still
+        charged in full. Hours keep the rates configured when first written.
+        """
+        prefix = self._statistic_id_prefix(meter_serial)
+        usage_statistic_id = f"{prefix}_usage"
+        cost_statistic_id = f"{prefix}_cost"
+        volume_rate = float(self.config_entry.options.get(CONF_VOLUME_RATE, 0))
+        standing_charge = float(self.config_entry.options.get(CONF_STANDING_CHARGE, 0))
+        recorder = get_instance(self.hass)
+
+        last_cost = await recorder.async_add_executor_job(
+            get_last_statistics, self.hass, 1, cost_statistic_id, True, {"sum"}
+        )
+        if last_cost:
+            last_record = last_cost[cost_statistic_id][0]
+            cost_sum = float(last_record.get("sum") or 0.0)
+            # Start at the last costed hour so its usage total is the baseline.
+            start = dt_util.utc_from_timestamp(last_record["start"])
+        else:
+            cost_sum = 0.0
+            start = dt_util.utc_from_timestamp(0)
+
+        usage = await recorder.async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            start,
+            None,
+            {usage_statistic_id},
+            "hour",
+            None,
+            {"state", "sum"},
+        )
+        records = usage.get(usage_statistic_id, [])
+        previous: dict[str, Any] | None = None
+        if last_cost and records and records[0]["start"] == start.timestamp():
+            previous = records.pop(0)
+        cost_statistics = []
+        for record in records:
+            if previous is None:
+                volume = float(record.get("state") or 0.0)
+                hours = 1.0
+            else:
+                volume = max(
+                    0.0,
+                    float(record.get("sum") or 0.0) - float(previous.get("sum") or 0.0),
+                )
+                hours = (record["start"] - previous["start"]) / 3600
+            previous = record
+            hour_cost = (volume * volume_rate + standing_charge * hours / 24) / 100
+            cost_sum += hour_cost
+            cost_statistics.append(
+                StatisticData(
+                    start=dt_util.utc_from_timestamp(record["start"]),
+                    state=round(hour_cost, 6),
+                    sum=round(cost_sum, 6),
+                )
+            )
+        if not cost_statistics:
+            return
+        _LOGGER.debug(
+            "Adding %s cost statistics for %s", len(cost_statistics), cost_statistic_id
+        )
+        async_add_external_statistics(
+            self.hass,
+            StatisticMetaData(
+                mean_type=StatisticMeanType.NONE,
+                has_sum=True,
+                name=(
+                    f"Anglian Water {self.config_entry.data[CONF_ACCOUNT_NUMBER]} "
+                    f"{meter_serial} Cost"
+                ),
+                source=DOMAIN,
+                statistic_id=cost_statistic_id,
+                unit_class=None,
+                unit_of_measurement="GBP",
+            ),
+            cost_statistics,
+        )
+
+    async def _update_month_to_date(self) -> None:
+        """Total this month's usage and cost from the statistics."""
+        month_start = dt_util.start_of_local_day(dt_util.now().replace(day=1))
+        for meter in self.api.meters.values():
+            prefix = self._statistic_id_prefix(meter.serial_number)
+            ids = {f"{prefix}_usage", f"{prefix}_cost"}
+            stats = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                month_start,
+                None,
+                ids,
+                "month",
+                None,
+                {"change"},
+            )
+            self.month_to_date[meter.serial_number] = {
+                key: sum(float(r.get("change") or 0.0) for r in stats.get(f"{prefix}_{key}", []))
+                for key in ("usage", "cost")
+            }
+
+    async def _insert_usage_statistics(self) -> None:
         """Insert statistics for water meters into Home Assistant."""
         for meter in self.api.meters.values():
             id_prefix = (

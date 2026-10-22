@@ -33,6 +33,8 @@ class AnglianWaterSensor(StrEnum):
     YESTERDAY_SEWERAGE_COST = "yesterday_sewerage_cost"
     LATEST_READING = "latest_reading"
     LAST_UPDATED = "last_updated"
+    MONTH_TO_DATE_USAGE = "month_to_date_usage"
+    MONTH_TO_DATE_COST = "month_to_date_cost"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -87,6 +89,35 @@ ENTITY_DESCRIPTIONS: tuple[AnglianWaterSensorEntityDescription, ...] = (
 )
 
 
+@dataclass(frozen=True, kw_only=True)
+class AnglianWaterMonthToDateEntityDescription(SensorEntityDescription):
+    """Describes a month-to-date sensor computed from statistics."""
+
+    statistic_key: str
+    requires_costs: bool = False
+
+
+MONTH_TO_DATE_DESCRIPTIONS: tuple[AnglianWaterMonthToDateEntityDescription, ...] = (
+    AnglianWaterMonthToDateEntityDescription(
+        key=AnglianWaterSensor.MONTH_TO_DATE_USAGE,
+        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+        device_class=SensorDeviceClass.WATER,
+        suggested_display_precision=3,
+        statistic_key="usage",
+        translation_key=AnglianWaterSensor.MONTH_TO_DATE_USAGE,
+    ),
+    AnglianWaterMonthToDateEntityDescription(
+        key=AnglianWaterSensor.MONTH_TO_DATE_COST,
+        native_unit_of_measurement="GBP",
+        device_class=SensorDeviceClass.MONETARY,
+        suggested_display_precision=2,
+        statistic_key="cost",
+        requires_costs=True,
+        translation_key=AnglianWaterSensor.MONTH_TO_DATE_COST,
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: AnglianWaterConfigEntry,
@@ -101,6 +132,16 @@ async def async_setup_entry(
         )
         for entity_description in ENTITY_DESCRIPTIONS
         for smart_meter in entry.runtime_data.api.meters.values()
+    )
+    async_add_devices(
+        AnglianWaterMonthToDateSensorEntity(
+            coordinator=entry.runtime_data,
+            description=entity_description,
+            smart_meter=smart_meter,
+        )
+        for entity_description in MONTH_TO_DATE_DESCRIPTIONS
+        for smart_meter in entry.runtime_data.api.meters.values()
+        if entry.runtime_data.costs_configured or not entity_description.requires_costs
     )
 
 
@@ -124,3 +165,28 @@ class AnglianWaterSensorEntity(AnglianWaterEntity, SensorEntity):
     def native_value(self) -> float | datetime | None:
         """Return the state of the sensor."""
         return self.entity_description.value_fn(self.smart_meter)
+
+
+class AnglianWaterMonthToDateSensorEntity(AnglianWaterEntity, SensorEntity):
+    """Defines a month-to-date sensor computed from statistics."""
+
+    entity_description: AnglianWaterMonthToDateEntityDescription
+
+    def __init__(
+        self,
+        coordinator: AnglianWaterUpdateCoordinator,
+        smart_meter: SmartMeter,
+        description: AnglianWaterMonthToDateEntityDescription,
+    ) -> None:
+        """Initialize month-to-date sensor."""
+        super().__init__(coordinator, smart_meter, description.key)
+        self.entity_description = description
+
+    @property
+    @override
+    def native_value(self) -> float | None:
+        """Return this month's total so far."""
+        totals = self.coordinator.month_to_date.get(self.smart_meter.serial_number)
+        if totals is None:
+            return None
+        return round(totals[self.entity_description.statistic_key], 4)

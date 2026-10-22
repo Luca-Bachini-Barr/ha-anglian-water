@@ -51,6 +51,12 @@
       "latest_reading": {
         "name": "Latest reading"
       },
+      "month_to_date_cost": {
+        "name": "Month to date cost"
+      },
+      "month_to_date_usage": {
+        "name": "Month to date usage"
+      },
       "yesterday_consumption": {
         "name": "Yesterday's usage"
       },
@@ -80,6 +86,22 @@
     "consent_required": {
       "description": "The terms and conditions for account {account_number} have been updated. Please visit and log in to your Anglian Water account to accept the new terms and conditions.\n\nThis issue will automatically resolve once the new conditions have been accepted and on the next refresh cycle.",
       "title": "Anglian Water terms and conditions updated"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tariff rates",
+        "description": "Used to calculate the hourly cost statistic and month-to-date cost. Rates come from your bill; they usually change each April. New rates apply to hours recorded from now on; earlier hours keep the rate they were costed at.",
+        "data": {
+          "volume_rate": "Volume rate",
+          "standing_charge": "Standing charge"
+        },
+        "data_description": {
+          "volume_rate": "Water plus sewerage charge per m³ of water used, in pence (e.g. water rate + 0.9 × sewerage rate).",
+          "standing_charge": "Total daily standing charge for water and sewerage, in pence."
+        }
+      }
     }
   }
 }
